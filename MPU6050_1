@@ -1,0 +1,74 @@
+#include <MPU6050_tockn.h>
+#include <Wire.h>
+
+MPU6050 mpu6050(Wire);
+
+unsigned long lastPrintTime = 0;
+const unsigned long INTERVAL = 50; // 50ms 마다 업데이트 (초당 20회, 빠른 반응)
+
+// 기울기 시각화 함수
+// - totalDots: 전체 o 개수
+// - stepAngle: o 하나당 간격 (도)
+// - deadzone: 감지 안 하는 수평/기준 오차 범위 (도)
+void printBar(const char* label, float angle, int totalDots, float stepAngle, float deadzone) {
+  Serial.print(label);
+  Serial.print(": [");
+
+  int halfDots = totalDots / 2; // 양방향 각각의 개수 (4개)
+
+  for (int i = 0; i < totalDots; i++) {
+    // i < 4 : 음수 영역, i >= 4 : 양수 영역 각도 기준 설정
+    float targetAngle = (i < halfDots) ? (i - halfDots) * stepAngle : (i - halfDots + 1) * stepAngle;
+    bool isTilted = false;
+
+    if (angle >= deadzone && targetAngle > 0) {
+      if (angle >= targetAngle) isTilted = true;
+    } else if (angle <= -deadzone && targetAngle < 0) {
+      if (angle <= targetAngle) isTilted = true;
+    }
+
+    if (isTilted) {
+      Serial.print("x ");
+    } else {
+      Serial.print("o ");
+    }
+  }
+
+  Serial.print("] (");
+  Serial.print(angle, 1);
+  Serial.println(" deg)");
+}
+
+void setup() {
+  Serial.begin(115200); // 시리얼 모니터 속도 설정
+  Wire.begin();
+  Wire.setClock(400000); // Fast I2C Mode (400kHz)
+
+  mpu6050.begin();
+  
+  Serial.println("센서 영점 조절 중... 바벨을 움직이지 마세요.");
+  mpu6050.calcGyroOffsets(true);
+  Serial.println("설정 완료!");
+}
+
+void loop() {
+  mpu6050.update();
+
+  unsigned long currentTime = millis();
+  if (currentTime - lastPrintTime >= INTERVAL) {
+    lastPrintTime = currentTime;
+
+    // 각 축 각도 데이터 가져오기
+    float angleY = mpu6050.getAngleY(); // Y축 (양옆 기울어짐)
+    float angleZ = mpu6050.getAngleZ(); // Z축 (회전/비뚤어짐)
+
+    // 화면 갱신 (줄 바꿈 처리)
+    Serial.println("------------------------------------------");
+    
+    // Y축: 8개 표시, 1개당 3도, 오차범위 1.5도
+    printBar("Y축 (기울기)", angleY, 8, 3.0, 1.5);
+    
+    // Z축: 8개 표시, 1개당 2도, 오차범위 1.0도
+    printBar("Z축 (비뚤어짐)", angleZ, 8, 2.0, 1.0);
+  }
+}
