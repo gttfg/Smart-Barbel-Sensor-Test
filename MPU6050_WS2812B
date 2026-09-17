@@ -1,0 +1,96 @@
+#include <MPU6050_tockn.h>
+#include <Wire.h>
+#include <Adafruit_NeoPixel.h>
+
+#define LED_PIN     6          // WS2812B 신호(DIN) 핀 번호
+#define NUM_LEDS    8          // LED 개수 (8개)
+
+// NeoPixel 객체 생성
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+MPU6050 mpu6050(Wire);
+
+unsigned long lastPrintTime = 0;
+const unsigned long INTERVAL = 50; // 50ms 마다 업데이트
+
+// LED 색상 정의 (32비트 RGB 컬러)
+const uint32_t COLOR_BASE   = strip.Color(0, 255, 0);     // 기본 색상 (초록)
+const uint32_t COLOR_Y_ONLY = strip.Color(255, 0, 0);     // Y축 기울어짐 (빨강)
+const uint32_t COLOR_Z_ONLY = strip.Color(255, 128, 0);   // Z축 비뚤어짐 (주황)
+const uint32_t COLOR_BOTH   = strip.Color(128, 0, 128);   // Y축 + Z축 동시 (보라)
+
+void updateLEDs(float angleY, float angleZ, int totalDots, float stepY, float deadzoneY, float stepZ, float deadzoneZ) {
+  int halfDots = totalDots / 2;
+
+  // Y축 센서 부호를 반대로 뒤집어 감지 방향 수정
+  float invAngleY = -angleY; 
+
+  for (int i = 0; i < totalDots; i++) {
+    // ---------------- Y축 기울어짐 판별 (방향 반전 적용) ----------------
+    float targetAngleY = (i < halfDots) ? (i - halfDots) * stepY : (i - halfDots + 1) * stepY;
+    bool yTilted = false;
+    if (invAngleY >= deadzoneY && targetAngleY > 0) {
+      if (invAngleY >= targetAngleY) yTilted = true;
+    } else if (invAngleY <= -deadzoneY && targetAngleY < 0) {
+      if (invAngleY <= targetAngleY) yTilted = true;
+    }
+
+    // ---------------- Z축 비뚤어짐 판별 ----------------
+    float targetAngleZ = (i < halfDots) ? (i - halfDots) * stepZ : (i - halfDots + 1) * stepZ;
+    bool zTilted = false;
+    if (angleZ >= deadzoneZ && targetAngleZ > 0) {
+      if (angleZ >= targetAngleZ) zTilted = true;
+    } else if (angleZ <= -deadzoneZ && targetAngleZ < 0) {
+      if (angleZ <= targetAngleZ) zTilted = true;
+    }
+
+    // ---------------- LED 색상 결정 ----------------
+    if (yTilted && zTilted) {
+      strip.setPixelColor(i, COLOR_BOTH);   // Y축 & Z축 동시 감지 -> 보라색
+    } else if (yTilted) {
+      strip.setPixelColor(i, COLOR_Y_ONLY); // Y축만 감지 -> 빨간색
+    } else if (zTilted) {
+      strip.setPixelColor(i, COLOR_Z_ONLY); // Z축만 감지 -> 주황색
+    } else {
+      strip.setPixelColor(i, COLOR_BASE);   // 정상 상태 -> 초록색
+    }
+  }
+
+  strip.show(); // LED 상태 적용
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  Wire.setClock(400000); // Fast I2C Mode (400kHz)
+
+  strip.begin();
+  strip.setBrightness(50); // 밝기 설정 (0~255)
+  
+  strip.fill(COLOR_BASE, 0, NUM_LEDS);
+  strip.show();
+
+  mpu6050.begin();
+
+  Serial.println("센서 영점 조절 중... 바벨을 움직이지 마세요.");
+  mpu6050.calcGyroOffsets(true);
+  Serial.println("설정 완료!");
+}
+
+void loop() {
+  mpu6050.update();
+
+  unsigned long currentTime = millis();
+  if (currentTime - lastPrintTime >= INTERVAL) {
+    lastPrintTime = currentTime;
+
+    float angleY = mpu6050.getAngleY(); // Y축 (양옆 기울어짐)
+    float angleZ = mpu6050.getAngleZ(); // Z축 (회전/비뚤어짐)
+
+    updateLEDs(angleY, angleZ, NUM_LEDS, 3.0, 1.5, 2.0, 1.0);
+
+    Serial.print("Y: "); Serial.print(angleY, 1);
+    Serial.print(" deg | Z: "); Serial.print(angleZ, 1);
+    Serial.println(" deg");
+  }
+}
