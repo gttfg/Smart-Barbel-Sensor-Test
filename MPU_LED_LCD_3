@@ -1,0 +1,151 @@
+#include <MPU6050_tockn.h>
+#include <Wire.h>
+#include <Adafruit_NeoPixel.h>
+#include <LiquidCrystal_I2C.h>
+
+#define LED_PIN     6
+#define NUM_LEDS    8
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+MPU6050 mpu6050(Wire);
+
+// I2C LCD 설정 (0x27 또는 0x3F)
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+unsigned long lastPrintTime = 0;
+const unsigned long INTERVAL = 50;
+
+// LED 색상 정의
+const uint32_t COLOR_BASE   = strip.Color(0, 255, 0);     // 초록
+const uint32_t COLOR_Y_ONLY = strip.Color(255, 0, 0);     // 빨강
+const uint32_t COLOR_Z_ONLY = strip.Color(255, 128, 0);   // 주황
+const uint32_t COLOR_BOTH   = strip.Color(128, 0, 128);   // 보라
+
+// 카운터 및 이동 감지 관련 변수
+int repCount = 0;              // 반복 횟수
+bool isDown = false;           // 아래로 내려간 상태인지 확인하는 플래그
+unsigned long lastRepTime = 0; // 중복 카운트 방지용 타이머
+
+// 임계값 설정
+const float ACCEL_DOWN_THRESHOLD = -0.3; 
+const float ACCEL_UP_THRESHOLD   =  0.2; 
+
+void updateLEDs(float angleY, float angleZ, int totalDots, float stepY, float deadzoneY, float stepZ, float deadzoneZ) {
+  int halfDots = totalDots / 2;
+  float invAngleY = -angleY;
+
+  for (int i = 0; i < totalDots; i++) {
+    float targetAngleY = (i < halfDots) ? (i - halfDots) * stepY : (i - halfDots + 1) * stepY;
+    bool yTilted = false;
+    if (invAngleY >= deadzoneY && targetAngleY > 0) {
+      if (invAngleY >= targetAngleY) yTilted = true;
+    } else if (invAngleY <= -deadzoneY && targetAngleY < 0) {
+      if (invAngleY <= targetAngleY) yTilted = true;
+    }
+
+    float targetAngleZ = (i < halfDots) ? (i - halfDots) * stepZ : (i - halfDots + 1) * stepZ;
+    bool zTilted = false;
+    if (angleZ >= deadzoneZ && targetAngleZ > 0) {
+      if (angleZ >= targetAngleZ) zTilted = true;
+    } else if (angleZ <= -deadzoneZ && targetAngleZ < 0) {
+      if (angleZ <= targetAngleZ) zTilted = true;
+    }
+
+    if (yTilted && zTilted) strip.setPixelColor(i, COLOR_BOTH);
+    else if (yTilted) strip.setPixelColor(i, COLOR_Y_ONLY);
+    else if (zTilted) strip.setPixelColor(i, COLOR_Z_ONLY);
+    else strip.setPixelColor(i, COLOR_BASE);
+  }
+  strip.show();
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  
+  // 1. I2C 통신 속도를 기본 100kHz로 설정 (노이즈에 훨씬 강함)
+  Wire.setClock(100000); 
+
+#if defined(ARDUINO_ARCH_AVR)
+  // 2. I2C 통신 멈춤 방지를 위한 타임아웃 설정 (AVR 아두이노 우노/나노 기준)
+  Wire.setWireTimeout(3000, true); 
+#endif
+
+  // LCD 초기화
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Init System...");
+
+  // NeoPixel 초기화 (전원 안정을 위해 밝기를 20으로 조절)
+  strip.begin();
+  strip.setBrightness(20); 
+  strip.fill(COLOR_BASE, 0, NUM_LEDS);
+  strip.show();
+
+  mpu6050.begin();
+
+  Serial.println("센서 영점 조절 중...");
+  mpu6050.calcGyroOffsets(true);
+  
+  lcd.clear();
+  lcd.setCursor(0, 1);
+  lcd.print("REP: 0");
+
+  Serial.println("설정 완료!");
+}
+
+void loop() {
+  mpu6050.update();
+
+  unsigned long currentTime = millis();
+
+  // 1. 카운터 동작
+  float accY = mpu6050.getAccY();
+
+  if (currentTime - lastRepTime > 500) { 
+    if (!isDown && accY < ACCEL_DOWN_THRESHOLD) {
+      isDown = true;
+    } 
+    else if (isDown && accY > ACCEL_UP_THRESHOLD) {
+      repCount++;
+      isDown = false;
+      lastRepTime = currentTime;
+
+      lcd.setCursor(0, 1);
+      lcd.print("REP: ");
+      lcd.print(repCount);
+      lcd.print("    "); 
+
+      Serial.print(">>> Count Up! REP: ");
+      Serial.println(repCount);
+    }
+  }
+
+  // 2. LED 및 LCD 디스플레이 업데이트
+  if (currentTime - lastPrintTime >= INTERVAL) {
+    lastPrintTime = currentTime;
+
+    float angleY = mpu6050.getAngleY();
+    float angleZ = mpu6050.getAngleZ();
+
+    // 센서 이상값(90도 고정) 수신 시 예외 처리
+    if (isnan(angleY) || isnan(angleZ)) {
+      return; 
+    }
+
+    updateLEDs(angleY, angleZ, NUM_LEDS, 3.0, 1.5, 2.0, 1.0);
+
+    float displayAngleY = -angleY;
+
+    Serial.print("Y: "); Serial.print(displayAngleY, 1);
+    Serial.print(" deg | Z: "); Serial.print(angleZ, 1);
+    Serial.print(" deg | REP: "); Serial.println(repCount);
+
+    lcd.setCursor(0, 0);
+    lcd.print("Y:"); lcd.print(displayAngleY, 1); lcd.print("   ");
+    lcd.setCursor(8, 0);
+    lcd.print("Z:"); lcd.print(angleZ, 1); lcd.print("   ");
+  }
+}
