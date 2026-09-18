@@ -1,0 +1,156 @@
+#include <MPU6050_tockn.h>
+#include <Wire.h>
+#include <Adafruit_NeoPixel.h>
+#include <LiquidCrystal_I2C.h>
+
+#define LED_PIN     6
+#define NUM_LEDS    8
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+MPU6050 mpu6050(Wire);
+
+// I2C LCD 설정 (0x27 또는 0x3F)
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+unsigned long lastPrintTime = 0;
+const unsigned long INTERVAL = 50;
+
+// LED 색상 정의
+const uint32_t COLOR_BASE   = strip.Color(0, 255, 0);     // 초록
+const uint32_t COLOR_Y_ONLY = strip.Color(255, 0, 0);     // 빨강
+const uint32_t COLOR_Z_ONLY = strip.Color(255, 128, 0);   // 주황
+const uint32_t COLOR_BOTH   = strip.Color(128, 0, 128);   // 보라
+
+// 카운터 및 이동 감지 관련 변수
+int repCount = 0;              // 반복 횟수
+bool isDown = false;           // 아래로 내려간 상태인지 확인하는 플래그
+unsigned long lastRepTime = 0; // 중복 카운트 방지용 타이머
+
+// 임계값 설정 (센서를 위/아래로 움직일 때 측정되는 가속도 임계값)
+const float ACCEL_DOWN_THRESHOLD = -0.3; // 아래로 하강 시 가속도 변화량 (g)
+const float ACCEL_UP_THRESHOLD   =  0.2; // 다시 원위치 복귀 시 가속도 변화량 (g)
+
+void updateLEDs(float angleY, float angleZ, int totalDots, float stepY, float deadzoneY, float stepZ, float deadzoneZ) {
+  int halfDots = totalDots / 2;
+
+  // Y축 방향 조정을 위해 센서 각도 부호 반전 적용
+  float invAngleY = -angleY;
+
+  for (int i = 0; i < totalDots; i++) {
+    // ---------------- Y축 기울어짐 판별 (부호 반전 적용된 invAngleY 사용) ----------------
+    float targetAngleY = (i < halfDots) ? (i - halfDots) * stepY : (i - halfDots + 1) * stepY;
+    bool yTilted = false;
+    if (invAngleY >= deadzoneY && targetAngleY > 0) {
+      if (invAngleY >= targetAngleY) yTilted = true;
+    } else if (invAngleY <= -deadzoneY && targetAngleY < 0) {
+      if (invAngleY <= targetAngleY) yTilted = true;
+    }
+
+    // ---------------- Z축 비뚤어짐 판별 ----------------
+    float targetAngleZ = (i < halfDots) ? (i - halfDots) * stepZ : (i - halfDots + 1) * stepZ;
+    bool zTilted = false;
+    if (angleZ >= deadzoneZ && targetAngleZ > 0) {
+      if (angleZ >= targetAngleZ) zTilted = true;
+    } else if (angleZ <= -deadzoneZ && targetAngleZ < 0) {
+      if (angleZ <= targetAngleZ) zTilted = true;
+    }
+
+    // ---------------- LED 색상 결정 ----------------
+    if (yTilted && zTilted) strip.setPixelColor(i, COLOR_BOTH);
+    else if (yTilted) strip.setPixelColor(i, COLOR_Y_ONLY);
+    else if (zTilted) strip.setPixelColor(i, COLOR_Z_ONLY);
+    else strip.setPixelColor(i, COLOR_BASE);
+  }
+  strip.show();
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  Wire.setClock(400000);
+
+  // LCD 초기화
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  
+  lcd.setCursor(0, 0);
+  lcd.print("Init System...");
+
+  // NeoPixel 초기화
+  strip.begin();
+  strip.setBrightness(30); 
+  strip.fill(COLOR_BASE, 0, NUM_LEDS);
+  strip.show();
+
+  mpu6050.begin();
+
+  Serial.println("센서 영점 조절 중...");
+  mpu6050.calcGyroOffsets(true);
+  
+  lcd.clear();
+  
+  // LCD 2번째 줄: 횟수(REP) 표시 초기화
+  lcd.setCursor(0, 1);
+  lcd.print("REP: 0");
+
+  Serial.println("설정 완료!");
+}
+
+void loop() {
+  mpu6050.update();
+
+  unsigned long currentTime = millis();
+
+  // -------------------------------------------------------------
+  // 1. 위-아래 움직임 카운트 알고리즘
+  // -------------------------------------------------------------
+  float accY = mpu6050.getAccY();
+
+  if (currentTime - lastRepTime > 500) { // 0.5초 디바운스
+    if (!isDown && accY < ACCEL_DOWN_THRESHOLD) {
+      isDown = true;
+    } 
+    else if (isDown && accY > ACCEL_UP_THRESHOLD) {
+      repCount++;
+      isDown = false;
+      lastRepTime = currentTime;
+
+      // LCD 2번째 줄 REP 카운트 업데이트
+      lcd.setCursor(0, 1);
+      lcd.print("REP: ");
+      lcd.print(repCount);
+      lcd.print("    "); 
+
+      Serial.print(">>> Count Up! REP: ");
+      Serial.println(repCount);
+    }
+  }
+
+  // -------------------------------------------------------------
+  // 2. LED 및 LCD/시리얼 업데이트
+  // -------------------------------------------------------------
+  if (currentTime - lastPrintTime >= INTERVAL) {
+    lastPrintTime = currentTime;
+
+    float angleY = mpu6050.getAngleY();
+    float angleZ = mpu6050.getAngleZ();
+
+    // LED 수평계 업데이트 (반전 처리 적용됨)
+    updateLEDs(angleY, angleZ, NUM_LEDS, 3.0, 1.5, 2.0, 1.0);
+
+    // 반전된 방향과 일치하도록 시리얼/LCD에 출력되는 Y축 값도 반전(-angleY)하여 표시
+    float displayAngleY = -angleY;
+
+    // 시리얼 출력
+    Serial.print("Y: "); Serial.print(displayAngleY, 1);
+    Serial.print(" deg | Z: "); Serial.print(angleZ, 1);
+    Serial.print(" deg | REP: "); Serial.println(repCount);
+
+    // LCD 1번째 줄: 반전 적용된 각도 표시
+    lcd.setCursor(0, 0);
+    lcd.print("Y:"); lcd.print(displayAngleY, 1); lcd.print("   ");
+    lcd.setCursor(8, 0);
+    lcd.print("Z:"); lcd.print(angleZ, 1); lcd.print("   ");
+  }
+}
