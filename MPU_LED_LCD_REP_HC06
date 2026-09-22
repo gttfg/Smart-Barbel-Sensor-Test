@@ -1,0 +1,150 @@
+#include <MPU6050_tockn.h>
+#include <Wire.h>
+#include <Adafruit_NeoPixel.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
+
+#define LED_PIN 6
+#define NUM_LEDS 8
+
+// HC-06 TXD -> Arduino D2 (RX), HC-06 RXD -> Arduino D3 (TX).
+SoftwareSerial bluetoothSerial(2, 3);
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+MPU6050 mpu6050(Wire);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+unsigned long lastPrintTime = 0;
+unsigned long lastBluetoothTime = 0;
+const unsigned long DISPLAY_INTERVAL = 50;
+const unsigned long BLUETOOTH_INTERVAL = 100;
+
+const uint32_t COLOR_BASE = strip.Color(0, 255, 0);
+const uint32_t COLOR_Y_ONLY = strip.Color(255, 0, 0);
+const uint32_t COLOR_Z_ONLY = strip.Color(255, 128, 0);
+const uint32_t COLOR_BOTH = strip.Color(128, 0, 128);
+
+int repCount = 0;  // Cumulative count since the Arduino was powered on.
+bool isDown = false;
+unsigned long lastRepTime = 0;
+
+const float ACCEL_DOWN_THRESHOLD = -0.3;
+const float ACCEL_UP_THRESHOLD = 0.2;
+
+void updateLEDs(float angleY, float angleZ, int totalDots,
+                float stepY, float deadzoneY, float stepZ, float deadzoneZ) {
+  int halfDots = totalDots / 2;
+  float invAngleY = -angleY;
+
+  for (int i = 0; i < totalDots; i++) {
+    float targetAngleY = (i < halfDots) ? (i - halfDots) * stepY : (i - halfDots + 1) * stepY;
+    bool yTilted = false;
+    if (invAngleY >= deadzoneY && targetAngleY > 0) {
+      if (invAngleY >= targetAngleY) yTilted = true;
+    } else if (invAngleY <= -deadzoneY && targetAngleY < 0) {
+      if (invAngleY <= targetAngleY) yTilted = true;
+    }
+
+    float targetAngleZ = (i < halfDots) ? (i - halfDots) * stepZ : (i - halfDots + 1) * stepZ;
+    bool zTilted = false;
+    if (angleZ >= deadzoneZ && targetAngleZ > 0) {
+      if (angleZ >= targetAngleZ) zTilted = true;
+    } else if (angleZ <= -deadzoneZ && targetAngleZ < 0) {
+      if (angleZ <= targetAngleZ) zTilted = true;
+    }
+
+    if (yTilted && zTilted) strip.setPixelColor(i, COLOR_BOTH);
+    else if (yTilted) strip.setPixelColor(i, COLOR_Y_ONLY);
+    else if (zTilted) strip.setPixelColor(i, COLOR_Z_ONLY);
+    else strip.setPixelColor(i, COLOR_BASE);
+  }
+  strip.show();
+}
+
+void sendBluetoothTelemetry(float angleY, float angleZ) {
+  // One newline-terminated packet per update; understood by the Android app.
+  bluetoothSerial.print("Y:");
+  bluetoothSerial.print(-angleY, 1);
+  bluetoothSerial.print(",Z:");
+  bluetoothSerial.print(angleZ, 1);
+  bluetoothSerial.print(",REP:");
+  bluetoothSerial.println(repCount);
+}
+
+void setup() {
+  Serial.begin(115200);          // PC Serial Monitor only.
+  bluetoothSerial.begin(9600);  // HC-06 factory default; adjust if reconfigured.
+  Wire.begin();
+  Wire.setClock(100000);
+
+#if defined(ARDUINO_ARCH_AVR)
+  Wire.setWireTimeout(3000, true);
+#endif
+
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Init System...");
+
+  strip.begin();
+  strip.setBrightness(20);
+  strip.fill(COLOR_BASE, 0, NUM_LEDS);
+  strip.show();
+
+  mpu6050.begin();
+  Serial.println("센서 영점 조절 중...");
+  mpu6050.calcGyroOffsets(true);
+
+  lcd.clear();
+  lcd.setCursor(0, 1);
+  lcd.print("REP: 0");
+  Serial.println("설정 완료!");
+}
+
+void loop() {
+  mpu6050.update();
+  unsigned long currentTime = millis();
+
+  float accY = mpu6050.getAccY();
+  if (currentTime - lastRepTime > 500) {
+    if (!isDown && accY < ACCEL_DOWN_THRESHOLD) {
+      isDown = true;
+    } else if (isDown && accY > ACCEL_UP_THRESHOLD) {
+      repCount++;
+      isDown = false;
+      lastRepTime = currentTime;
+
+      lcd.setCursor(0, 1);
+      lcd.print("REP: ");
+      lcd.print(repCount);
+      lcd.print("    ");
+
+      Serial.print(">>> Count Up! REP: ");
+      Serial.println(repCount);
+    }
+  }
+
+  if (currentTime - lastPrintTime >= DISPLAY_INTERVAL) {
+    lastPrintTime = currentTime;
+    float angleY = mpu6050.getAngleY();
+    float angleZ = mpu6050.getAngleZ();
+    if (isnan(angleY) || isnan(angleZ)) return;
+
+    updateLEDs(angleY, angleZ, NUM_LEDS, 3.0, 1.5, 2.0, 1.0);
+
+    float displayAngleY = -angleY;
+    Serial.print("Y: "); Serial.print(displayAngleY, 1);
+    Serial.print(" deg | Z: "); Serial.print(angleZ, 1);
+    Serial.print(" deg | REP: "); Serial.println(repCount);
+
+    lcd.setCursor(0, 0);
+    lcd.print("Y:"); lcd.print(displayAngleY, 1); lcd.print("   ");
+    lcd.setCursor(8, 0);
+    lcd.print("Z:"); lcd.print(angleZ, 1); lcd.print("   ");
+
+    if (currentTime - lastBluetoothTime >= BLUETOOTH_INTERVAL) {
+      lastBluetoothTime = currentTime;
+      sendBluetoothTelemetry(angleY, angleZ);
+    }
+  }
+}
